@@ -1,132 +1,119 @@
 import streamlit as st
-import torch
-from transformers import BertTokenizer, BertForSequenceClassification, pipeline
-import shap
-import streamlit.components.v1 as components
 import os
-import sys
+from PIL import Image
 
-# Add src to path for data_prep
-sys.path.append(os.path.abspath('./src'))
-from data_prep import clean_text
+# import my custom modules
+from src.image_processing import preprocess_image
+from src.ocr_engine import extract_text_from_image
+from src.nlp_translator import load_database, translate_prescription
 
-# Page config
-st.set_page_config(page_title="Fake News Detector", page_icon="🕵️‍♂️", layout="wide")
+# 1. Setup the page layout and title
+st.set_page_config(
+    page_title="Doctor's Prescription Translator", 
+    page_icon="⚕️", 
+    layout="centered"
+)
 
-# Modern styling
+# 2. Add some custom CSS to make the UI look premium but simple
 st.markdown("""
 <style>
     .main {
-        background-color: #0e1117;
+        background-color: #f8f9fa;
     }
-    h1 {
-        color: #00ffcc;
-        font-family: 'Inter', sans-serif;
+    .title-text {
         text-align: center;
+        color: #2c3e50;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+    .subtitle-text {
+        text-align: center;
+        color: #7f8c8d;
+        font-size: 18px;
         margin-bottom: 30px;
     }
-    .stTextArea textarea {
-        background-color: #1a1c24;
-        color: #ffffff;
-        border: 1px solid #00ffcc;
-        border-radius: 10px;
+    .success-card {
+        background-color: #e8f8f5;
+        padding: 25px;
+        border-radius: 12px;
+        border-left: 6px solid #1abc9c;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        margin-top: 20px;
+        text-align: center;
     }
-    .stButton>button {
-        background-color: #00ffcc;
-        color: #000000;
+    .drug-name {
+        color: #16a085;
+        font-size: 32px;
         font-weight: bold;
-        border-radius: 8px;
-        width: 100%;
-        transition: 0.3s;
+        margin: 10px 0;
     }
-    .stButton>button:hover {
-        background-color: #00ccaa;
+    .confidence-badge {
+        display: inline-block;
+        background-color: #1abc9c;
         color: white;
-    }
-    .prediction-box-real {
-        padding: 20px;
-        border-radius: 10px;
-        background-color: rgba(0, 255, 0, 0.1);
-        border: 1px solid #00ff00;
-        text-align: center;
-        margin-top: 20px;
-    }
-    .prediction-box-fake {
-        padding: 20px;
-        border-radius: 10px;
-        background-color: rgba(255, 0, 0, 0.1);
-        border: 1px solid #ff0000;
-        text-align: center;
-        margin-top: 20px;
+        padding: 4px 12px;
+        border-radius: 15px;
+        font-size: 14px;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🕵️‍♂️ AI Fake News Detector")
-st.markdown("<p style='text-align: center; color: #a0a0a0;'>Powered by BERT & SHAP Explainability</p>", unsafe_allow_html=True)
+# 3. Render the Header
+st.markdown("<h1 class='title-text'>⚕️ Prescription Translator</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle-text'>Upload messy doctor handwriting and let AI translate it into a readable medicine name.</p>", unsafe_allow_html=True)
 
-@st.cache_resource
-def load_model():
-    model_path = "./fake_news_bert"
-    if not os.path.exists(model_path):
-        return None, None
+# 4. File Uploader UI
+st.write("### Step 1: Upload a Prescription")
+uploaded_file = st.file_uploader("Choose an image (PNG, JPG, JPEG)", type=["jpg", "png", "jpeg"])
+
+if uploaded_file is not None:
+    # Save the file temporarily so our opencv script can read it from the hard drive
+    temp_path = "temp_image.jpg"
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+        
+    # Create two columns to show the uploaded image and the results side-by-side
+    col1, col2 = st.columns([1, 1])
     
-    device = 0 if (torch.cuda.is_available() or torch.backends.mps.is_available()) else -1
-    tokenizer = BertTokenizer.from_pretrained(model_path)
-    model = BertForSequenceClassification.from_pretrained(model_path)
-    pipe = pipeline("text-classification", model=model, tokenizer=tokenizer, device=device)
-    return pipe, tokenizer
-
-pipe, tokenizer = load_model()
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    user_input = st.text_area("Paste a news article here:", height=250, placeholder="E.g. Breaking: Scientists have discovered a new planet...")
-    analyze_btn = st.button("Analyze Article")
-
-with col2:
-    st.markdown("### 📊 How it works")
-    st.markdown("""
-    This system uses **BERT**, a state-of-the-art transformer model trained to understand the context of words. 
+    with col1:
+        st.write("**Original Image:**")
+        st.image(uploaded_file, use_container_width=True, caption="Doctor's Handwriting")
     
-    Instead of just looking for keywords, it analyzes the entire sentence structure to determine if the news is **Reliable** or **Fake**.
-    
-    The **SHAP** plot below will highlight *why* the model made its decision, showing the most influential words.
-    """)
-
-if analyze_btn:
-    if not pipe:
-        st.error("Model not found! Please run the Jupyter Notebook first to train and save the BERT model.")
-    elif not user_input.strip():
-        st.warning("Please enter some text to analyze.")
-    else:
-        with st.spinner("Analyzing context & predicting..."):
-            cleaned_text = clean_text(user_input)
-            
-            # Prediction
-            result = pipe(cleaned_text)[0]
-            label = result['label']
-            score = result['score']
-            
-            # Note: label mapping depends on your dataset. Assuming LABEL_0 is Reliable, LABEL_1 is Fake
-            is_fake = (label == "LABEL_1") 
-            
-            if is_fake:
-                st.markdown(f"<div class='prediction-box-fake'><h2>🚨 FAKE NEWS DETECTED</h2><p>Confidence: {score:.1%}</p></div>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"<div class='prediction-box-real'><h2>✅ RELIABLE NEWS</h2><p>Confidence: {score:.1%}</p></div>", unsafe_allow_html=True)
-
-            # SHAP Explainability
-            st.markdown("### 🧠 AI Thought Process (SHAP)")
-            try:
-                explainer = shap.Explainer(pipe)
-                shap_values = explainer([cleaned_text])
-                
-                # Get the HTML for the plot
-                shap_html = shap.plots.text(shap_values, display=False)
-                
-                # Display in Streamlit using components
-                components.html(f"<div style='background-color: white; padding: 10px; border-radius: 5px;'>{shap_html}</div>", height=400, scrolling=True)
-            except Exception as e:
-                st.error(f"Could not generate SHAP explanation: {e}")
+    with col2:
+        st.write("**AI Analysis:**")
+        # Only start running the heavy AI models when the user clicks the button
+        if st.button("🔍 Run Translation Engine", use_container_width=True):
+            with st.spinner('Applying Computer Vision & NLP...'):
+                try:
+                    # 1. Computer Vision Step (cleaning the image)
+                    processed_img = preprocess_image(temp_path)
+                    
+                    # 2. OCR Step (extracting the raw, messy text)
+                    raw_text = extract_text_from_image(processed_img)
+                    
+                    # 3. NLP Step (fuzzy matching the messy text against our database)
+                    db_list = load_database("data/medicine_database.csv")
+                    translated_drug, confidence = translate_prescription(raw_text, db_list)
+                    
+                    # Show exactly what the OCR engine saw (usually funny gibberish)
+                    st.info(f"**Raw OCR Output:** `{raw_text}`")
+                    
+                    # Show the final beautiful result box
+                    st.markdown(f"""
+                    <div class="success-card">
+                        <p style="color:#7f8c8d; margin:0;">Translates to:</p>
+                        <h2 class="drug-name">{translated_drug}</h2>
+                        <span class="confidence-badge">Confidence: {confidence}%</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                except Exception as e:
+                    # Catch any errors (like if Tesseract isn't installed)
+                    st.error(f"Error: {e}")
+                    st.write("Make sure you ran `brew install tesseract` on your Mac!")
+                    
+    # Clean up the temporary image file so we don't waste disk space
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
